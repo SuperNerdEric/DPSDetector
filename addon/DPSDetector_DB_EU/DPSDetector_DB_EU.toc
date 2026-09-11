@@ -1,0 +1,10 @@
+## Interface: 120007, 120100
+## Title: DPS Detector |cffFFFFFFDatabase|r (Europe)
+## Notes: Warcraft Logs M+ snapshot for EU characters.
+## Version: 1.0.0
+## Dependencies: DPSDetector
+## DefaultState: enabled
+## X-Region: Europe
+## X-Type: Mythic Plus
+../DPSDetector/db/eu_characters.lua
+../DPSDetector/db/eu_lookup.lua

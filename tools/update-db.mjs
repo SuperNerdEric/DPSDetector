@@ -17,10 +17,9 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..");
-// Generated Lua snapshots are written into the live WoW addon folder.
+// Generated Lua snapshots land in the repo addon tree (copy to WoW with scripts/sync-to-wow.ps1).
 const ADDON_ROOT =
-  process.env.DPSDETECTOR_ADDON_ROOT ||
-  "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns\\DPSDetector";
+  process.env.DPSDETECTOR_ADDON_ROOT || join(PROJECT_ROOT, "addon", "DPSDetector");
 const ROOT = ADDON_ROOT;
 const CACHE_DIR = join(__dirname, ".cache");
 const SEASON_PATH = join(__dirname, "season.json");
@@ -28,14 +27,40 @@ const SEASON_PATH = join(__dirname, "season.json");
 const TOKEN_URL = "https://www.warcraftlogs.com/oauth/token";
 const GQL_URL = "https://www.warcraftlogs.com/api/v2/client";
 
+const REGION_ALIASES = {
+  us: "us",
+  americas: "us",
+  na: "us",
+  oceanic: "us",
+  eu: "eu",
+  europe: "eu",
+  kr: "kr",
+  korea: "kr",
+  tw: "tw",
+  taiwan: "tw",
+  cn: "cn",
+  china: "cn",
+};
+
+function normalizeRegion(value) {
+  const key = String(value || "").trim().toLowerCase();
+  const region = REGION_ALIASES[key];
+  if (!region) {
+    throw new Error(
+      `Unknown region "${value}". Use: us|americas, eu|europe, kr|korea, tw|taiwan`
+    );
+  }
+  return region;
+}
+
 const args = parseArgs(process.argv.slice(2));
 const season = JSON.parse(readFileSync(SEASON_PATH, "utf8"));
 
-const PAGES = Number(args.pages ?? 15);
-const DELAY_MS = Number(args.delay ?? 400);
+const PAGES = Number(args.pages ?? 5);
+const DELAY_MS = Number(args.delay ?? 1200);
 const REGIONS = String(args.region ?? "us")
   .split(",")
-  .map((value) => value.trim().toLowerCase())
+  .map((value) => normalizeRegion(value))
   .filter(Boolean);
 const DISCOVER_ONLY = Boolean(args.discover);
 const SEASON_ONLY = Boolean(args["season-only"]);
@@ -116,7 +141,7 @@ async function getToken() {
 }
 
 async function graphql(token, query, variables = {}) {
-  for (let attempt = 0; attempt < 6; attempt += 1) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     const response = await fetch(GQL_URL, {
       method: "POST",
       headers: {
@@ -127,8 +152,8 @@ async function graphql(token, query, variables = {}) {
     });
 
     if (response.status === 429) {
-      const wait = Number(response.headers.get("retry-after") || 30) * 1000;
-      console.warn(`Rate limited. Waiting ${wait}ms...`);
+      const wait = Math.max(Number(response.headers.get("retry-after") || 60) * 1000, 60000);
+      console.warn(`\nHTTP 429 rate limited. Waiting ${Math.round(wait / 1000)}s...`);
       await sleep(wait);
       continue;
     }
@@ -136,8 +161,10 @@ async function graphql(token, query, variables = {}) {
     const payload = await response.json();
     if (payload.errors) {
       const message = payload.errors.map((error) => error.message).join("; ");
-      if (/rate|too many/i.test(message) && attempt < 5) {
-        await sleep(15000 * (attempt + 1));
+      if (/rate|too many|points/i.test(message) && attempt < 7) {
+        const wait = 60000 * (attempt + 1);
+        console.warn(`\nAPI limit error. Waiting ${Math.round(wait / 1000)}s... (${message})`);
+        await sleep(wait);
         continue;
       }
       throw new Error(message);
@@ -147,6 +174,27 @@ async function graphql(token, query, variables = {}) {
   }
 
   throw new Error("Warcraft Logs request failed after retries.");
+}
+
+async function getRateLimit(token) {
+  const data = await graphql(
+    token,
+    `{ rateLimitData { limitPerHour pointsSpentThisHour pointsResetIn } }`
+  );
+  return data.rateLimitData;
+}
+
+async function respectRateLimit(token) {
+  const info = await getRateLimit(token);
+  if (!info) return;
+  const remaining = info.limitPerHour - info.pointsSpentThisHour;
+  if (remaining < 200) {
+    const waitMs = Math.max((info.pointsResetIn || 60) * 1000 + 5000, 65000);
+    console.warn(
+      `\nPoint budget low (${info.pointsSpentThisHour.toFixed(0)}/${info.limitPerHour}). Waiting ${Math.round(waitMs / 1000)}s for reset...`
+    );
+    await sleep(waitMs);
+  }
 }
 
 function namesMatch(left, right) {
@@ -186,11 +234,17 @@ async function discoverEncounters(token) {
     zone = zones.find((entry) => entry.id === season.wclZoneId);
   }
   if (!zone) {
+    zone = zones.find((entry) => namesMatch(entry.name, season.wclZoneName) && !/\bPTR\b/i.test(entry.name));
+  }
+  if (!zone) {
     zone = zones.find((entry) => namesMatch(entry.name, season.wclZoneName));
   }
   if (!zone) {
     zone = zones.find((entry) =>
-      /mythic\+|m\+/i.test(entry.name) && /season\s*2|s2/i.test(entry.name) && /midnight/i.test(entry.name + entry.expansionName)
+      /mythic\+|m\+/i.test(entry.name) &&
+      /season\s*2|s2/i.test(entry.name) &&
+      /midnight/i.test(entry.name + entry.expansionName) &&
+      !/\bPTR\b/i.test(entry.name)
     );
   }
   if (!zone) {
@@ -253,15 +307,28 @@ function writeCache(parts, data) {
 
 function rankingList(raw) {
   const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
-  if (!parsed) return { rankings: [], hasMorePages: false };
+  if (!parsed) return { rankings: [], hasMorePages: false, count: 0, page: 1 };
   return {
     rankings: parsed.rankings || parsed.pageData?.rankings || [],
     hasMorePages: Boolean(parsed.hasMorePages),
+    count: Number(parsed.count || 0),
+    page: Number(parsed.page || 1),
   };
 }
 
-function rankingPercent(row) {
-  return Number(row.rankPercent ?? row.percentile ?? row.historicalPercent ?? 0);
+function rankingPercent(row, absoluteRank, page, rankingsLength, hasMorePages) {
+  const direct = Number(row.rankPercent ?? row.percentile ?? row.historicalPercent);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+
+  // WCL's `count` field is the page size (~100), not total population.
+  if (!hasMorePages) {
+    const total = (page - 1) * 100 + rankingsLength;
+    if (total <= 0) return 0;
+    return Math.max(0, Math.min(100, (100 * (total - absoluteRank + 1)) / total));
+  }
+
+  const window = Math.max(PAGES * 100, absoluteRank);
+  return Math.max(50, Math.min(99, 100 - ((absoluteRank - 1) / window) * 50));
 }
 
 function rankingSpecId(row, spec) {
@@ -303,6 +370,7 @@ async function fetchRankings(token, encounterId, spec, metric, region, page) {
   const data = await graphql(
     token,
     `query Rankings($encounterID: Int!, $page: Int!, $serverRegion: String, $className: String, $specName: String, $metric: CharacterRankingMetricType${difficultyArg}) {
+      rateLimitData { limitPerHour pointsSpentThisHour pointsResetIn }
       worldData {
         encounter(id: $encounterID) {
           characterRankings(
@@ -317,6 +385,17 @@ async function fetchRankings(token, encounterId, spec, metric, region, page) {
     }`,
     variables
   );
+
+  if (data.rateLimitData) {
+    const remaining = data.rateLimitData.limitPerHour - data.rateLimitData.pointsSpentThisHour;
+    if (remaining < 200) {
+      const waitMs = Math.max((data.rateLimitData.pointsResetIn || 60) * 1000 + 5000, 65000);
+      console.warn(
+        `\nPoint budget low (${data.rateLimitData.pointsSpentThisHour.toFixed(0)}/${data.rateLimitData.limitPerHour}). Waiting ${Math.round(waitMs / 1000)}s...`
+      );
+      await sleep(waitMs);
+    }
+  }
 
   const parsed = rankingList(data.worldData?.encounter?.characterRankings);
   writeCache(key, parsed);
@@ -511,10 +590,22 @@ async function collectRegion(token, region) {
   }
 
   console.log(`${region.toUpperCase()}: ${jobs.length} ranking series, up to ${PAGES} pages each`);
+  await respectRateLimit(token);
 
+  let liveRequests = 0;
   for (const [jobIndex, job] of jobs.entries()) {
     for (let page = 1; page <= PAGES; page += 1) {
       process.stdout.write(`\r${region.toUpperCase()} ${jobIndex + 1}/${jobs.length} ${job.dungeon.shortName} ${job.spec.className}-${job.spec.specName} p${page}   `);
+      const cacheKey = {
+        encounterId: job.dungeon.wclEncounterId,
+        className: job.spec.className,
+        specName: job.spec.specName,
+        metric: job.metric,
+        region,
+        page,
+        difficulty: season.wclDifficulty ?? null,
+      };
+      const wasCached = Boolean(readCache(cacheKey));
       let parsed;
       try {
         parsed = await fetchRankings(token, job.dungeon.wclEncounterId, job.spec, job.metric, region, page);
@@ -523,7 +614,14 @@ async function collectRegion(token, region) {
         break;
       }
 
-      for (const row of parsed.rankings) {
+      if (!wasCached) {
+        liveRequests += 1;
+        if (liveRequests % 25 === 0) {
+          await respectRateLimit(token);
+        }
+      }
+
+      for (const [rowIndex, row] of parsed.rankings.entries()) {
         const name = row.name;
         const realm = rankingServer(row);
         if (!name || !realm) continue;
@@ -540,7 +638,14 @@ async function collectRegion(token, region) {
 
         const player = players.get(key);
         const amount = Number(row.amount) || 0;
-        const percentile = rankingPercent(row);
+        const absoluteRank = ((parsed.page || page) - 1) * 100 + rowIndex + 1;
+        const percentile = rankingPercent(
+          row,
+          absoluteRank,
+          parsed.page || page,
+          parsed.rankings.length,
+          Boolean(parsed.hasMorePages)
+        );
         const specId = rankingSpecId(row, job.spec);
         if (job.spec.role === "healer") {
           consider(player.healing, amount, percentile, specId, job.dungeonIndex);

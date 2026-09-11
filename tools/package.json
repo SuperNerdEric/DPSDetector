@@ -6,7 +6,11 @@
   "scripts": {
     "discover": "node update-db.mjs --discover",
     "season": "node update-db.mjs --season-only",
-    "us": "node update-db.mjs --region us --pages 15",
-    "eu": "node update-db.mjs --region eu --pages 15"
+    "us": "node update-db.mjs --region us --pages 5 --delay 1200",
+    "americas": "node update-db.mjs --region americas --pages 5 --delay 1200",
+    "eu": "node update-db.mjs --region eu --pages 5 --delay 1200",
+    "kr": "node update-db.mjs --region kr --pages 5 --delay 1200",
+    "tw": "node update-db.mjs --region tw --pages 5 --delay 1200",
+    "rebuild:us": "node rebuild-from-cache.mjs --region us --pages 5"
   }
 }

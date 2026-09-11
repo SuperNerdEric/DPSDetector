@@ -1,0 +1,24 @@
+name: Update WCL Snapshot (EU)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pages:
+        description: Ranking pages per dungeon/spec (100 players each)
+        required: false
+        default: "5"
+      delay:
+        description: Delay between live API requests in milliseconds
+        required: false
+        default: "1200"
+
+jobs:
+  update-eu:
+    uses: ./.github/workflows/update-region.yml
+    with:
+      region: eu
+      pages: ${{ github.event.inputs.pages || '5' }}
+      delay: ${{ github.event.inputs.delay || '1200' }}
+    secrets:
+      WCL_CLIENT_ID: ${{ secrets.WCL_CLIENT_ID }}
+      WCL_CLIENT_SECRET: ${{ secrets.WCL_CLIENT_SECRET }}

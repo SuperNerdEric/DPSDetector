@@ -1,0 +1,10 @@
+## Interface: 120007, 120100
+## Title: DPS Detector |cffFFFFFFDatabase|r (Americas)
+## Notes: Warcraft Logs M+ snapshot for US/Oceanic characters.
+## Version: 1.0.0
+## Dependencies: DPSDetector
+## DefaultState: enabled
+## X-Region: Americas
+## X-Type: Mythic Plus
+../DPSDetector/db/us_characters.lua
+../DPSDetector/db/us_lookup.lua

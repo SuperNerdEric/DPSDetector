@@ -1,0 +1,19 @@
+## Interface: 120007, 120100
+## Title: DPS Detector
+## Notes: Shows Warcraft Logs Mythic+ DPS/HPS and percentiles on player and LFG tooltips.
+## Author: Eric
+## Version: 1.0.0
+## SavedVariables: DPSDetector_Config
+## OptionalDeps: DPSDetector_DB_US, DPSDetector_DB_EU, DPSDetector_DB_KR, DPSDetector_DB_TW
+## IconTexture: Interface\Icons\ability_hunter_snipershot
+## X-Website: https://www.warcraftlogs.com
+## X-Category: Mythic Plus
+
+core.lua
+season.lua
+colors.lua
+config.lua
+provider.lua
+focus.lua
+tooltip.lua
+DPSDetector.lua

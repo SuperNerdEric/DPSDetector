@@ -4,6 +4,7 @@ Thumbs.db
 tools/.env
 tools/.cache/
 tools/node_modules/
+tools/crawl-*.log
 .env
 .env.*
 !.env.example

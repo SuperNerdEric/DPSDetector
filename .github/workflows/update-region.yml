@@ -1,0 +1,108 @@
+name: Update region snapshot (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      region:
+        description: WCL region code (us, eu, kr, tw)
+        required: true
+        type: string
+      pages:
+        description: Ranking pages per dungeon/spec
+        required: false
+        type: string
+        default: "5"
+      delay:
+        description: Delay between API requests (ms)
+        required: false
+        type: string
+        default: "1200"
+    secrets:
+      WCL_CLIENT_ID:
+        required: true
+      WCL_CLIENT_SECRET:
+        required: true
+  workflow_dispatch:
+    inputs:
+      region:
+        description: Region to crawl
+        required: true
+        type: choice
+        options:
+          - us
+          - eu
+          - kr
+          - tw
+        default: us
+      pages:
+        description: Ranking pages per dungeon/spec
+        required: false
+        default: "5"
+      delay:
+        description: Delay between API requests (ms)
+        required: false
+        default: "1200"
+
+permissions:
+  contents: write
+
+jobs:
+  crawl-and-bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Write credentials
+        working-directory: tools
+        env:
+          WCL_CLIENT_ID: ${{ secrets.WCL_CLIENT_ID }}
+          WCL_CLIENT_SECRET: ${{ secrets.WCL_CLIENT_SECRET }}
+        run: |
+          cat > .env <<EOF
+          WCL_CLIENT_ID=${WCL_CLIENT_ID}
+          WCL_CLIENT_SECRET=${WCL_CLIENT_SECRET}
+          EOF
+
+      - name: Discover season encounters
+        working-directory: tools
+        run: node update-db.mjs --discover
+
+      - name: Crawl region rankings and write Lua
+        working-directory: tools
+        env:
+          REGION: ${{ inputs.region }}
+          PAGES: ${{ inputs.pages }}
+          DELAY: ${{ inputs.delay }}
+        run: |
+          node update-db.mjs \
+            --region "$REGION" \
+            --pages "$PAGES" \
+            --delay "$DELAY"
+
+      - name: Remove local secrets file
+        working-directory: tools
+        run: rm -f .env
+
+      - name: Commit bundled addon data
+        env:
+          REGION: ${{ inputs.region }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "addon/DPSDetector/db/${REGION}_characters.lua" \
+                  "addon/DPSDetector/db/${REGION}_lookup.lua" \
+                  "addon/DPSDetector/season.lua" \
+                  "tools/season.json"
+          if git diff --cached --quiet; then
+            echo "No data changes to commit."
+            exit 0
+          fi
+          git commit -m "chore(db): refresh ${REGION} WCL snapshot"
+          git push

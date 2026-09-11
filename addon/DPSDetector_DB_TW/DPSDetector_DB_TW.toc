@@ -1,0 +1,10 @@
+## Interface: 120007, 120100
+## Title: DPS Detector |cffFFFFFFDatabase|r (Taiwan)
+## Notes: Warcraft Logs M+ snapshot for TW characters.
+## Version: 1.0.0
+## Dependencies: DPSDetector
+## DefaultState: disabled
+## X-Region: Taiwan
+## X-Type: Mythic Plus
+../DPSDetector/db/tw_characters.lua
+../DPSDetector/db/tw_lookup.lua
