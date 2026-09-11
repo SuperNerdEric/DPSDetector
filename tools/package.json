@@ -1,0 +1,12 @@
+{
+  "name": "dpsdetector-tools",
+  "private": true,
+  "type": "module",
+  "description": "Warcraft Logs snapshot builder for the DPS Detector addon",
+  "scripts": {
+    "discover": "node update-db.mjs --discover",
+    "season": "node update-db.mjs --season-only",
+    "us": "node update-db.mjs --region us --pages 15",
+    "eu": "node update-db.mjs --region eu --pages 15"
+  }
+}
