@@ -50,19 +50,19 @@ Default pacing is safe for the free 3600 points/hour budget:
 ```powershell
 cd tools
 node update-db.mjs --discover
-node update-db.mjs --region us --pages 5 --delay 1200
+node update-db.mjs --region us --pages 1000 --delay 1200
 ```
 
 Americas alias works the same:
 
 ```powershell
-node update-db.mjs --region americas --pages 5 --delay 1200
+node update-db.mjs --region americas --pages 1000 --delay 1200
 ```
 
 Other regions later:
 
 ```powershell
-node update-db.mjs --region eu --pages 5 --delay 1200
+node update-db.mjs --region eu --pages 1000 --delay 1200
 ```
 
 Outputs (bundled into the addon tree automatically):
@@ -77,7 +77,7 @@ If `.cache` already has pages and you only need to regenerate Lua:
 
 ```powershell
 cd tools
-node rebuild-from-cache.mjs --region us --pages 5
+node rebuild-from-cache.mjs --region us --pages 1000
 ```
 
 ## Sync into WoW for testing

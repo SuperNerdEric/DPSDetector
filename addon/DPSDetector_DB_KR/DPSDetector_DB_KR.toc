@@ -5,6 +5,7 @@
 ## Dependencies: DPSDetector
 ## DefaultState: disabled
 ## X-Region: Korea
+## X-Faction: Both
 ## X-Type: Mythic Plus
 ../DPSDetector/db/kr_characters.lua
 ../DPSDetector/db/kr_lookup.lua

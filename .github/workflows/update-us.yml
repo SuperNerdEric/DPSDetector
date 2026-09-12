@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       pages:
-        description: Ranking pages per dungeon/spec (100 players each)
+        description: Pages per spec board (WCL caps at 20; ~100 players each)
         required: false
-        default: "5"
+        default: "20"
       delay:
         description: Delay between live API requests in milliseconds
         required: false
@@ -20,7 +20,7 @@ jobs:
     uses: ./.github/workflows/update-region.yml
     with:
       region: us
-      pages: ${{ github.event.inputs.pages || '5' }}
+      pages: ${{ github.event.inputs.pages || '20' }}
       delay: ${{ github.event.inputs.delay || '1200' }}
     secrets:
       WCL_CLIENT_ID: ${{ secrets.WCL_CLIENT_ID }}

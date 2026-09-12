@@ -27,19 +27,44 @@ local function SpecLabel(specID)
     return format(" %s", specName)
 end
 
-local function AddMetricLine(tooltip, label, metric, highlight)
-    if not metric or not metric.amount or metric.amount <= 0 then
+local function ParseText(parse)
+    if not parse or not parse.amount or parse.amount <= 0 then
+        return nil
+    end
+
+    local text = format("%s%s", ns.FormatNumber(parse.amount), SpecLabel(parse.spec))
+    local shortName = parse.dungeon and parse.dungeon.shortName
+    if parse.level and parse.level > 0 and shortName then
+        text = format("%s (+%d %s)", text, parse.level, shortName)
+    elseif parse.level and parse.level > 0 then
+        text = format("%s (+%d)", text, parse.level)
+    end
+    return text
+end
+
+local function AddParseLine(tooltip, label, parse, highlight)
+    local text = ParseText(parse)
+    if not text then
         return false
     end
 
-    local text = format("%s (%s)%s", ns.FormatNumber(metric.amount), ns.FormatPercent(metric.percentile), SpecLabel(metric.spec))
     local r1, g1, b1 = 1, 1, 1
     if highlight then
         r1, g1, b1 = 0, 1, 0
     end
-    local r2, g2, b2 = ns.GetParseColor(metric.percentile)
-    tooltip:AddDoubleLine(label, text, r1, g1, b1, r2, g2, b2)
+    tooltip:AddDoubleLine(label or " ", text, r1, g1, b1, 1, 0.85, 0)
     return true
+end
+
+local function AddSlotLines(tooltip, label, slot, highlight)
+    if not slot then
+        return false
+    end
+    local added = AddParseLine(tooltip, label, slot.key or slot, highlight)
+    if slot.peak then
+        added = AddParseLine(tooltip, " ", slot.peak, false) or added
+    end
+    return added
 end
 
 function ns.AppendTooltip(tooltip, name, realm, region, role, activityID)
@@ -62,39 +87,68 @@ function ns.AppendTooltip(tooltip, name, realm, region, role, activityID)
     local dungeonLabelPrefix = kind == "hps" and "Best HPS for" or "Best DPS for"
 
     tooltip:AddLine(" ")
-    if ns.GetOption("showSeasonLine") then
-        tooltip:AddLine(format("%s (%s)", ns.ADDON_TITLE, ns.SEASON.name), 1, 0.85, 0)
-    else
-        tooltip:AddLine(ns.ADDON_TITLE, 1, 0.85, 0)
-    end
+    tooltip:AddLine(ns.ADDON_TITLE, 1, 0.85, 0)
 
-    local added = AddMetricLine(tooltip, overallLabel, metricSet.overall, false)
+    local added = AddSlotLines(tooltip, overallLabel, metricSet.overall or metricSet, false)
 
     if focusedDungeon then
         local dungeonMetric = metricSet.dungeons[focusedDungeon.index]
-        local highlight = dungeonMetric and metricSet.overall and dungeonMetric.amount == metricSet.overall.amount
-        added = AddMetricLine(tooltip, format("%s %s", dungeonLabelPrefix, focusedDungeon.shortName), dungeonMetric, highlight) or added
+        local highlight = dungeonMetric and metricSet.key and dungeonMetric.key
+            and dungeonMetric.key.dungeonIndex == metricSet.key.dungeonIndex
+            and dungeonMetric.key.level == metricSet.key.level
+        added = AddSlotLines(
+            tooltip,
+            format("%s %s", dungeonLabelPrefix, focusedDungeon.shortName),
+            dungeonMetric,
+            highlight
+        ) or added
     end
 
     return added
+end
+
+-- Post-calls run in registration order. We register early, so Blizzard item
+-- level and Raider.IO land below us unless we wait until the frame is done.
+local flushPending = {}
+local appendedKey = {}
+
+local function ResetUnitTooltipState(tooltip)
+    appendedKey[tooltip] = nil
+end
+
+local function FlushUnitTooltip(tooltip)
+    flushPending[tooltip] = nil
+    if not tooltip.IsShown or not tooltip:IsShown() then
+        return
+    end
+
+    local name, realm, unit = ns.GetTooltipPlayer(tooltip)
+    if not name then
+        return
+    end
+
+    local key = name .. "-" .. realm
+    if appendedKey[tooltip] == key then
+        return
+    end
+
+    if ns.AppendTooltip(tooltip, name, realm, ns.PLAYER_REGION, ns.GetUnitRole(unit), nil) then
+        appendedKey[tooltip] = key
+        tooltip:Show()
+    end
 end
 
 local function AppendUnitTooltip(tooltip)
     if not ns.GetOption("enableUnitTooltips") then
         return
     end
-
-    local _, unit = tooltip:GetUnit()
-    if not unit or not UnitIsPlayer(unit) then
+    if flushPending[tooltip] then
         return
     end
-
-    local name, realm = ns.GetUnitNameRealm(unit)
-    if not name then
-        return
-    end
-
-    ns.AppendTooltip(tooltip, name, realm, ns.PLAYER_REGION, ns.GetUnitRole(unit), nil)
+    flushPending[tooltip] = true
+    C_Timer.After(0, function()
+        FlushUnitTooltip(tooltip)
+    end)
 end
 
 local function GetSearchActivityID(resultID)
@@ -184,8 +238,19 @@ local function HookButton(button, onEnter, onLeave)
         return
     end
     hookedButtons[button] = true
-    button:HookScript("OnEnter", onEnter)
-    button:HookScript("OnLeave", onLeave or HideTooltip)
+    local leave = onLeave or HideTooltip
+    if button.HookScript then
+        button:HookScript("OnEnter", onEnter)
+        button:HookScript("OnLeave", leave)
+    end
+    if hooksecurefunc then
+        if type(button.OnEnter) == "function" then
+            hooksecurefunc(button, "OnEnter", onEnter)
+        end
+        if type(button.OnLeave) == "function" then
+            hooksecurefunc(button, "OnLeave", leave)
+        end
+    end
 end
 
 local function OnApplicantMemberEnter(self)
@@ -220,9 +285,355 @@ local function HookScrollBox(scrollBox, onEnter)
 
     if scrollBox.RegisterCallback then
         scrollBox:RegisterCallback("OnUpdate", HookVisible, addonName)
-        scrollBox:RegisterCallback("OnDataRangeChanged", HookVisible, addonName)
+        scrollBox:RegisterCallback("OnDataRangeChanged", function()
+            HookVisible()
+            if scrollBox.IsMouseOver and scrollBox:IsMouseOver() and scrollBox.GetFrames then
+                for _, frame in ipairs(scrollBox:GetFrames()) do
+                    if frame:IsMouseOver() then
+                        onEnter(frame)
+                    end
+                end
+            end
+        end, addonName .. "Range")
     end
     HookVisible()
+end
+
+local function ShowNamedProfile(owner, fullName, role, anchor, offsetX, offsetY, opts)
+    if not owner or not fullName then
+        return
+    end
+    opts = opts or {}
+
+    C_Timer.After(0, function()
+        if not GameTooltip or not GameTooltip.IsShown then
+            return
+        end
+
+        local name, realm = ns.SplitNameRealm(fullName, ns.PLAYER_REALM)
+        if not name then
+            return
+        end
+
+        local mouseOverOwner = owner.IsMouseOver and owner:IsMouseOver()
+        local tipOwner = GameTooltip.GetOwner and GameTooltip:GetOwner()
+        local ownedByUs = tipOwner == owner or (tipOwner and tipOwner.GetParent and tipOwner:GetParent() == owner)
+        local ownerStillShown = opts.requireHover == false and owner.IsShown and owner:IsShown()
+        if not mouseOverOwner and not ownedByUs and not ownerStillShown and not ns.TooltipShowsName(GameTooltip, name) then
+            return
+        end
+
+        if not GameTooltip:IsShown() then
+            if not mouseOverOwner and not ownerStillShown then
+                return
+            end
+            GameTooltip:SetOwner(owner, anchor or "ANCHOR_RIGHT", offsetX or 0, offsetY or 0)
+        end
+
+        local key = name .. "-" .. realm
+        if appendedKey[GameTooltip] == key then
+            return
+        end
+
+        if ns.AppendTooltip(GameTooltip, name, realm, ns.PLAYER_REGION, role or ns.ROLES.DAMAGER, nil) then
+            appendedKey[GameTooltip] = key
+            GameTooltip:Show()
+        elseif GameTooltip:NumLines() == 0 then
+            GameTooltip:Hide()
+        end
+    end)
+end
+
+local function ResolveFriendsButton(button)
+    if not button then
+        return nil, nil
+    end
+
+    local candidates, seen = {}, {}
+    local function consider(name, realm)
+        if not name or not realm then
+            return
+        end
+        local key = ns.NormalizeName(name) .. "#" .. ns.NormalizeRealm(realm)
+        if seen[key] then
+            return
+        end
+        seen[key] = true
+        candidates[#candidates + 1] = { name, realm }
+    end
+
+    local elementData = button.elementData
+    local accountInfo = elementData and elementData.accountInfo
+    if accountInfo then
+        consider(ns.AccountCharacterNameRealm(accountInfo.gameAccountInfo))
+        if accountInfo.bnetAccountID then
+            consider(ns.GetNameRealmForBNetFriend(accountInfo.bnetAccountID, elementData.friendIndex))
+        end
+    end
+
+    if button.buttonType == FRIENDS_BUTTON_TYPE_BNET and button.id and C_BattleNet then
+        local info = C_BattleNet.GetFriendAccountInfo(button.id)
+        if not info and C_BattleNet.GetAccountInfoByID then
+            info = C_BattleNet.GetAccountInfoByID(button.id)
+        end
+        if info then
+            consider(ns.AccountCharacterNameRealm(info.gameAccountInfo))
+            consider(ns.GetNameRealmForBNetFriend(info.bnetAccountID or button.id, button.id))
+        else
+            consider(ns.GetNameRealmForBNetFriend(button.id))
+        end
+    end
+
+    if button.buttonType == FRIENDS_BUTTON_TYPE_WOW and button.id and C_FriendList then
+        local friendInfo = C_FriendList.GetFriendInfoByIndex(button.id)
+        if friendInfo and friendInfo.name then
+            consider(ns.SplitNameRealm(friendInfo.name, ns.PLAYER_REALM))
+        end
+    end
+
+    for i = 1, #candidates do
+        local name, realm = candidates[i][1], candidates[i][2]
+        if ns.GetPlayerRecord(name, realm, ns.PLAYER_REGION) then
+            return name, realm
+        end
+    end
+    if candidates[1] then
+        return candidates[1][1], candidates[1][2]
+    end
+    return nil, nil
+end
+
+local function OnFriendsButtonEnter(self)
+    if not ns.GetOption("enableFriendsTooltips") then
+        return
+    end
+    local name, realm = ResolveFriendsButton(self)
+    if name and realm then
+        ShowNamedProfile(self, name .. "-" .. realm, ns.ROLES.DAMAGER, "ANCHOR_RIGHT")
+    end
+end
+
+local function CollectFrameTexts(frame, into, depth)
+    if not frame or (depth or 0) > 5 then
+        return
+    end
+    if frame.GetRegions then
+        local regions = { frame:GetRegions() }
+        for i = 1, #regions do
+            local region = regions[i]
+            if region and region.GetText then
+                local text = region:GetText()
+                if type(text) == "string" and text ~= "" then
+                    into[#into + 1] = text
+                end
+            end
+        end
+    end
+    if frame.GetChildren then
+        local children = { frame:GetChildren() }
+        for i = 1, #children do
+            CollectFrameTexts(children[i], into, (depth or 0) + 1)
+        end
+    end
+end
+
+local function NameRealmFromTexts(texts)
+    local name, realm
+    for i = 1, #texts do
+        local text = texts[i]:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+        local realmLine = text:match("^[Rr]ealm:%s*(.+)$")
+        if realmLine then
+            realm = realmLine:gsub("%s+", "")
+        end
+        local named = text:match("^([^,]+),%s*%d+")
+        if named then
+            name = strtrim(named)
+        end
+    end
+    if name and realm then
+        return ns.SplitNameRealm(name, realm)
+    end
+end
+
+local function AppendFriendsProfile(name, realm, owner)
+    if not name or not realm or not GameTooltip then
+        return
+    end
+    if not GameTooltip:IsShown() then
+        if owner and owner.IsShown and owner:IsShown() then
+            GameTooltip:SetOwner(owner, "ANCHOR_BOTTOMRIGHT", -(owner.GetWidth and owner:GetWidth() or 0), -4)
+        else
+            return
+        end
+    end
+    local key = name .. "-" .. realm
+    if appendedKey[GameTooltip] == key then
+        return
+    end
+    if ns.AppendTooltip(GameTooltip, name, realm, ns.PLAYER_REGION, ns.ROLES.DAMAGER, nil) then
+        appendedKey[GameTooltip] = key
+        GameTooltip:Show()
+    end
+end
+
+local friendsTooltipHooked = false
+
+local function HookFriendsTooltip()
+    local friendsTooltip = _G.FriendsTooltip
+    if not friendsTooltip or friendsTooltipHooked or not hooksecurefunc then
+        return
+    end
+    friendsTooltipHooked = true
+
+    -- FriendsTooltip:Show can run every frame. Raider.IO SetOwner-clears
+    -- GameTooltip each time, so we must append in this same hook — After(0)
+    -- is always one frame late and gets wiped.
+    hooksecurefunc(friendsTooltip, "Show", function(self)
+        if not ns.GetOption("enableFriendsTooltips") then
+            return
+        end
+        local name, realm = ResolveFriendsButton(self.button)
+        if not name then
+            local texts = {}
+            CollectFrameTexts(self, texts)
+            CollectFrameTexts(GameTooltip, texts)
+            name, realm = NameRealmFromTexts(texts)
+        end
+        AppendFriendsProfile(name, realm, self)
+    end)
+    hooksecurefunc(friendsTooltip, "Hide", function()
+        if GameTooltip:IsShown() and appendedKey[GameTooltip] and not ns.GetTooltipUnit(GameTooltip) then
+            GameTooltip:Hide()
+        end
+    end)
+end
+
+local function OnGuildRosterEnter(self)
+    if not ns.GetOption("enableGuildTooltips") then
+        return
+    end
+    local index = self.index or self.guildIndex
+    if not index or not GetGuildRosterInfo then
+        return
+    end
+    local fullName = GetGuildRosterInfo(index)
+    if ns.IsSecret(fullName) or not fullName then
+        return
+    end
+    local name, realm = ns.SplitNameRealm(fullName, ns.PLAYER_REALM)
+    local role = ns.ROLES.DAMAGER
+    if name and ns.PLAYER_NAME and ns.NormalizeName(name) == ns.NormalizeName(ns.PLAYER_NAME) then
+        role = ns.GetUnitRole("player")
+    end
+    ShowNamedProfile(self, fullName, role, "ANCHOR_TOPLEFT")
+end
+
+local function CommunityMemberName(button)
+    local info
+    if type(button.GetMemberInfo) == "function" then
+        info = button:GetMemberInfo()
+    end
+    if not info then
+        info = button.memberInfo
+    end
+    if info and not ns.IsSecret(info) then
+        if info.clubType and Enum and Enum.ClubType then
+            if info.clubType ~= Enum.ClubType.Guild and info.clubType ~= Enum.ClubType.Character then
+                return nil, nil
+            end
+        end
+        local guid = info.guid
+        if guid and not ns.IsSecret(guid) and UnitGUID("player") == guid then
+            return ns.PLAYER_NAME, ns.PLAYER_REALM
+        end
+        if info.name and not ns.IsSecret(info.name) then
+            local realm = info.realm
+            if realm and ns.IsSecret(realm) then
+                realm = nil
+            end
+            return ns.SplitNameRealm(info.name, realm or ns.PLAYER_REALM)
+        end
+    end
+    if button.guid and not ns.IsSecret(button.guid) and UnitGUID("player") == button.guid then
+        return ns.PLAYER_NAME, ns.PLAYER_REALM
+    end
+    return nil, nil
+end
+
+local function OnCommunityMemberEnter(self)
+    if not ns.GetOption("enableGuildTooltips") then
+        return
+    end
+    local name, realm = CommunityMemberName(self)
+    if not name then
+        local unitName, unitRealm = ns.GetTooltipPlayer(GameTooltip)
+        if unitName then
+            name, realm = unitName, unitRealm
+        end
+    end
+    if not name then
+        return
+    end
+    local role = ns.ROLES.DAMAGER
+    local _, _, unit = ns.GetTooltipPlayer(GameTooltip)
+    if unit then
+        role = ns.GetUnitRole(unit)
+    elseif ns.PLAYER_NAME and ns.NormalizeName(name) == ns.NormalizeName(ns.PLAYER_NAME) then
+        role = ns.GetUnitRole("player")
+    end
+    ShowNamedProfile(self, name .. "-" .. (realm or ns.PLAYER_REALM), role, "ANCHOR_LEFT")
+end
+
+local function OnWhoEnter(self)
+    if not ns.GetOption("enableWhoTooltips") then
+        return
+    end
+    local index = self.index or self.whoIndex
+    if not index or not C_FriendList or not C_FriendList.GetWhoInfo then
+        return
+    end
+    local info = C_FriendList.GetWhoInfo(index)
+    if not info or not info.fullName then
+        return
+    end
+    ShowNamedProfile(self, info.fullName, ns.ROLES.DAMAGER, "ANCHOR_LEFT")
+end
+
+local function EachScrollBox(getter, onEnter)
+    local ok, scrollBox = pcall(getter)
+    if ok and scrollBox then
+        HookScrollBox(scrollBox, onEnter, HideTooltip)
+    end
+end
+
+function ns.InitSocialTooltips()
+    HookFriendsTooltip()
+
+    EachScrollBox(function()
+        return FriendsListFrame and FriendsListFrame.ScrollBox
+    end, OnFriendsButtonEnter)
+    EachScrollBox(function()
+        return FriendsFrame and FriendsFrame.ScrollBox
+    end, OnFriendsButtonEnter)
+    EachScrollBox(function()
+        return FriendsFrame and FriendsFrame.FriendsList and FriendsFrame.FriendsList.ScrollBox
+    end, OnFriendsButtonEnter)
+    EachScrollBox(function()
+        return SocialUIFrame and SocialUIFrame.FriendsList and SocialUIFrame.FriendsList.ScrollBox
+    end, OnFriendsButtonEnter)
+
+    EachScrollBox(function()
+        return GuildRosterContainer
+    end, OnGuildRosterEnter)
+    EachScrollBox(function()
+        return CommunitiesFrame and CommunitiesFrame.MemberList and CommunitiesFrame.MemberList.ScrollBox
+    end, OnCommunityMemberEnter)
+    EachScrollBox(function()
+        return WhoFrame and WhoFrame.ScrollBox
+    end, OnWhoEnter)
+    EachScrollBox(function()
+        return WhoListScrollFrame
+    end, OnWhoEnter)
 end
 
 function ns.InitTooltips()
@@ -239,4 +650,9 @@ function ns.InitTooltips()
     if LFGListFrame and LFGListFrame.ApplicationViewer then
         HookScrollBox(LFGListFrame.ApplicationViewer.ScrollBox, OnApplicantRowEnter)
     end
+
+    GameTooltip:HookScript("OnTooltipCleared", ResetUnitTooltipState)
+    GameTooltip:HookScript("OnHide", ResetUnitTooltipState)
+
+    ns.InitSocialTooltips()
 end

@@ -3,8 +3,10 @@ local _, ns = ...
 local defaults = {
     enableUnitTooltips = true,
     enableLFGTooltips = true,
+    enableGuildTooltips = true,
+    enableFriendsTooltips = true,
+    enableWhoTooltips = true,
     showSpec = true,
-    showSeasonLine = true,
 }
 
 local function CopyDefaults(src, dest)

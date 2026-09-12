@@ -3,17 +3,30 @@
  * Builds Raider.IO-style Lua snapshot files from the Warcraft Logs v2 API.
  *
  *   set WCL_CLIENT_ID and WCL_CLIENT_SECRET
- *   node tools/update-db.mjs --region us --pages 15
+ *   node tools/update-db.mjs --region us --pages 20
  *
- * Warcraft Logs rate-limits ranking queries. This script pages rankings
- * per dungeon + spec (instead of looking up every character) and caches
- * pages under tools/.cache so you can resume.
+ * WCL hard-caps every ranking board at 20 pages (~2000 rows). Unfiltered
+ * boards therefore only cover a few thousand unique players. This script
+ * pages each spec (role-correct metric) so each spec gets its own 2000-row
+ * window, then merges by raw amount + key level — not by spec rank.
+ * Optional --brackets 10-30 also crawls unfiltered boards per keystone
+ * level (WCL's bracket argument is keystone - 1). Pages are cached under
+ * tools/.cache so you can resume.
  */
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  buildSpecIndex,
+  ingestRow,
+  luaString,
+  metricForSpec,
+  normalizeRealm,
+  packMetric,
+  rankingCacheKey,
+} from "./snapshot-lib.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..");
@@ -56,7 +69,7 @@ function normalizeRegion(value) {
 const args = parseArgs(process.argv.slice(2));
 const season = JSON.parse(readFileSync(SEASON_PATH, "utf8"));
 
-const PAGES = Number(args.pages ?? 5);
+const PAGES = Number(args.pages ?? 20);
 const DELAY_MS = Number(args.delay ?? 1200);
 const REGIONS = String(args.region ?? "us")
   .split(",")
@@ -64,6 +77,15 @@ const REGIONS = String(args.region ?? "us")
   .filter(Boolean);
 const DISCOVER_ONLY = Boolean(args.discover);
 const SEASON_ONLY = Boolean(args["season-only"]);
+const SLICES = new Set(
+  String(args.slice ?? "spec")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean)
+);
+const BRACKETS = parseBracketList(args.brackets);
+if (BRACKETS.length && !SLICES.has("bracket")) SLICES.add("bracket");
+if (!SLICES.has("spec") && !SLICES.has("bracket")) SLICES.add("spec");
 
 function parseArgs(argv) {
   const out = {};
@@ -82,23 +104,30 @@ function parseArgs(argv) {
   return out;
 }
 
+function parseBracketList(value) {
+  if (value == null) return [];
+  const text = value === true ? "10-30" : String(value).trim();
+  if (!text) return [];
+  if (text.includes("-")) {
+    const [start, end] = text.split("-").map((part) => Number(part));
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) return [];
+    return Array.from({ length: end - start + 1 }, (_, index) => start + index);
+  }
+  return text
+    .split(",")
+    .map((part) => Number(part.trim()))
+    .filter((number) => Number.isFinite(number) && number > 0);
+}
+
+// WCL characterRankings.bracket N returns rows with hardModeLevel N+1.
+function keystoneJobs(levels) {
+  return levels
+    .map((level) => ({ keystoneLevel: level, bracket: level - 1 }))
+    .filter((entry) => entry.bracket >= 1);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function normalizeRealm(realm) {
-  return String(realm || "")
-    .replace(/['’\-]/g, "")
-    .replace(/\s+/g, "")
-    .toLowerCase();
-}
-
-function playerKey(name, realm) {
-  return `${String(name).toLowerCase()}#${normalizeRealm(realm)}`;
-}
-
-function luaString(value) {
-  return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 function luaArray(values) {
@@ -316,52 +345,30 @@ function rankingList(raw) {
   };
 }
 
-function rankingPercent(row, absoluteRank, page, rankingsLength, hasMorePages) {
-  const direct = Number(row.rankPercent ?? row.percentile ?? row.historicalPercent);
-  if (Number.isFinite(direct) && direct > 0) return direct;
-
-  // WCL's `count` field is the page size (~100), not total population.
-  if (!hasMorePages) {
-    const total = (page - 1) * 100 + rankingsLength;
-    if (total <= 0) return 0;
-    return Math.max(0, Math.min(100, (100 * (total - absoluteRank + 1)) / total));
-  }
-
-  const window = Math.max(PAGES * 100, absoluteRank);
-  return Math.max(50, Math.min(99, 100 - ((absoluteRank - 1) / window) * 50));
-}
-
-function rankingSpecId(row, spec) {
-  return Number(row.specID ?? row.specId ?? spec.specId ?? 0);
-}
-
-function rankingServer(row) {
-  if (typeof row.server === "string") return row.server;
-  return row.server?.name || row.server?.slug || "";
-}
-
-async function fetchRankings(token, encounterId, spec, metric, region, page) {
-  const key = {
-    encounterId,
-    className: spec.className,
-    specName: spec.specName,
-    metric,
+async function fetchRankings(token, job, region, page) {
+  const key = rankingCacheKey({
+    encounterId: job.dungeon.wclEncounterId,
+    className: job.spec?.className ?? null,
+    specName: job.spec?.specName ?? null,
+    metric: job.metric,
     region,
     page,
     difficulty: season.wclDifficulty ?? null,
-  };
+    bracket: job.bracket ?? null,
+  });
   const cached = readCache(key);
   if (cached) return cached;
 
   const difficultyArg = season.wclDifficulty ? ", $difficulty: Int" : "";
   const difficultyField = season.wclDifficulty ? ", difficulty: $difficulty" : "";
   const variables = {
-    encounterID: encounterId,
+    encounterID: job.dungeon.wclEncounterId,
     page,
     serverRegion: region.toUpperCase(),
-    className: spec.className,
-    specName: spec.specName,
-    metric,
+    metric: job.metric,
+    className: job.spec?.className ?? null,
+    specName: job.spec?.specName ?? null,
+    bracket: job.bracket ?? null,
   };
   if (season.wclDifficulty) {
     variables.difficulty = season.wclDifficulty;
@@ -369,16 +376,25 @@ async function fetchRankings(token, encounterId, spec, metric, region, page) {
 
   const data = await graphql(
     token,
-    `query Rankings($encounterID: Int!, $page: Int!, $serverRegion: String, $className: String, $specName: String, $metric: CharacterRankingMetricType${difficultyArg}) {
+    `query Rankings(
+      $encounterID: Int!,
+      $page: Int!,
+      $serverRegion: String,
+      $metric: CharacterRankingMetricType,
+      $className: String,
+      $specName: String,
+      $bracket: Int${difficultyArg}
+    ) {
       rateLimitData { limitPerHour pointsSpentThisHour pointsResetIn }
       worldData {
         encounter(id: $encounterID) {
           characterRankings(
             page: $page
             serverRegion: $serverRegion
+            metric: $metric
             className: $className
             specName: $specName
-            metric: $metric${difficultyField}
+            bracket: $bracket${difficultyField}
           )
         }
       }
@@ -401,39 +417,6 @@ async function fetchRankings(token, encounterId, spec, metric, region, page) {
   writeCache(key, parsed);
   await sleep(DELAY_MS);
   return parsed;
-}
-
-function emptyMetric(dungeonCount) {
-  return {
-    overall: { amount: 0, percentile: 0, spec: 0 },
-    dungeons: Array.from({ length: dungeonCount }, () => ({ amount: 0, percentile: 0, spec: 0 })),
-  };
-}
-
-function consider(slot, amount, percentile, specId, dungeonIndex) {
-  if (!amount || amount <= 0) return;
-  const current = slot.dungeons[dungeonIndex];
-  if (amount > current.amount) {
-    slot.dungeons[dungeonIndex] = { amount, percentile, spec: specId };
-  }
-  if (amount > slot.overall.amount) {
-    slot.overall = { amount, percentile, spec: specId };
-  }
-}
-
-function packMetric(slot) {
-  if (!slot || slot.overall.amount <= 0) return "";
-  const parts = [
-    `${Math.round(slot.overall.amount)},${Math.round(slot.overall.percentile)},${slot.overall.spec}`,
-  ];
-  for (const dungeon of slot.dungeons) {
-    if (!dungeon.amount) {
-      parts.push("0,0,0");
-    } else {
-      parts.push(`${Math.round(dungeon.amount)},${Math.round(dungeon.percentile)},${dungeon.spec}`);
-    }
-  }
-  return parts.join("|");
 }
 
 function writeSeasonLua() {
@@ -576,41 +559,69 @@ function writeRegionLua(region, players) {
   console.log(`Wrote ${numCharacters} ${region.toUpperCase()} characters`);
 }
 
-async function collectRegion(token, region) {
-  const dungeonCount = season.dungeons.length;
-  const players = new Map();
+function jobLabel(job) {
+  const spec = job.spec ? `${job.spec.className}-${job.spec.specName}` : "all";
+  const bracket = job.keystoneLevel != null ? ` +${job.keystoneLevel}` : "";
+  return `${job.dungeon.shortName} ${spec} ${job.metric}${bracket}`;
+}
 
+function buildJobs() {
   const jobs = [];
   for (const [dungeonIndex, dungeon] of season.dungeons.entries()) {
     if (!dungeon.wclEncounterId) continue;
-    for (const spec of season.specs) {
-      const metric = spec.role === "healer" ? "hps" : "dps";
-      jobs.push({ dungeon, dungeonIndex, spec, metric });
+    if (SLICES.has("spec")) {
+      for (const spec of season.specs) {
+        jobs.push({
+          dungeon,
+          dungeonIndex,
+          metric: metricForSpec(spec),
+          spec,
+          bracket: null,
+        });
+      }
+    }
+    if (SLICES.has("bracket")) {
+      const levels = BRACKETS.length ? BRACKETS : parseBracketList("10-30");
+      for (const { keystoneLevel, bracket } of keystoneJobs(levels)) {
+        jobs.push({ dungeon, dungeonIndex, metric: "dps", spec: null, bracket, keystoneLevel });
+        jobs.push({ dungeon, dungeonIndex, metric: "hps", spec: null, bracket, keystoneLevel });
+      }
     }
   }
+  return jobs;
+}
 
-  console.log(`${region.toUpperCase()}: ${jobs.length} ranking series, up to ${PAGES} pages each`);
+async function collectRegion(token, region) {
+  const dungeonCount = season.dungeons.length;
+  const specIndex = buildSpecIndex(season.specs);
+  const players = new Map();
+  const jobs = buildJobs();
+
+  console.log(
+    `${region.toUpperCase()}: ${jobs.length} ranking series (${[...SLICES].join("+")}), up to ${PAGES} pages each`
+  );
   await respectRateLimit(token);
 
   let liveRequests = 0;
   for (const [jobIndex, job] of jobs.entries()) {
     for (let page = 1; page <= PAGES; page += 1) {
-      process.stdout.write(`\r${region.toUpperCase()} ${jobIndex + 1}/${jobs.length} ${job.dungeon.shortName} ${job.spec.className}-${job.spec.specName} p${page}   `);
-      const cacheKey = {
+      process.stdout.write(`\r${region.toUpperCase()} ${jobIndex + 1}/${jobs.length} ${jobLabel(job)} p${page}   `);
+      const cacheKey = rankingCacheKey({
         encounterId: job.dungeon.wclEncounterId,
-        className: job.spec.className,
-        specName: job.spec.specName,
+        className: job.spec?.className ?? null,
+        specName: job.spec?.specName ?? null,
         metric: job.metric,
         region,
         page,
         difficulty: season.wclDifficulty ?? null,
-      };
+        bracket: job.bracket ?? null,
+      });
       const wasCached = Boolean(readCache(cacheKey));
       let parsed;
       try {
-        parsed = await fetchRankings(token, job.dungeon.wclEncounterId, job.spec, job.metric, region, page);
+        parsed = await fetchRankings(token, job, region, page);
       } catch (error) {
-        console.warn(`\nFailed ${job.dungeon.shortName} ${job.spec.specName} p${page}: ${error.message}`);
+        console.warn(`\nFailed ${jobLabel(job)} p${page}: ${error.message}`);
         break;
       }
 
@@ -621,39 +632,8 @@ async function collectRegion(token, region) {
         }
       }
 
-      for (const [rowIndex, row] of parsed.rankings.entries()) {
-        const name = row.name;
-        const realm = rankingServer(row);
-        if (!name || !realm) continue;
-        const key = playerKey(name, realm);
-        if (!players.has(key)) {
-          players.set(key, {
-            name,
-            realm,
-            damage: emptyMetric(dungeonCount),
-            tank: emptyMetric(dungeonCount),
-            healing: emptyMetric(dungeonCount),
-          });
-        }
-
-        const player = players.get(key);
-        const amount = Number(row.amount) || 0;
-        const absoluteRank = ((parsed.page || page) - 1) * 100 + rowIndex + 1;
-        const percentile = rankingPercent(
-          row,
-          absoluteRank,
-          parsed.page || page,
-          parsed.rankings.length,
-          Boolean(parsed.hasMorePages)
-        );
-        const specId = rankingSpecId(row, job.spec);
-        if (job.spec.role === "healer") {
-          consider(player.healing, amount, percentile, specId, job.dungeonIndex);
-        } else if (job.spec.role === "tank") {
-          consider(player.tank, amount, percentile, specId, job.dungeonIndex);
-        } else {
-          consider(player.damage, amount, percentile, specId, job.dungeonIndex);
-        }
+      for (const row of parsed.rankings) {
+        ingestRow(players, row, specIndex, dungeonCount, job.dungeonIndex, job.metric);
       }
 
       if (!parsed.hasMorePages || parsed.rankings.length === 0) {

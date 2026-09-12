@@ -1,6 +1,6 @@
 # DPS Detector
 
-Shows Warcraft Logs Mythic+ DPS/HPS and percentiles on player and LFG tooltips.
+Shows Warcraft Logs Mythic+ DPS/HPS on player and LFG tooltips.
 
 Install with the matching region pack (for Americas: `DPSDetector_DB_US`).
 

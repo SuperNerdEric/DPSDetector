@@ -5,6 +5,7 @@
 ## Dependencies: DPSDetector
 ## DefaultState: enabled
 ## X-Region: Europe
+## X-Faction: Both
 ## X-Type: Mythic Plus
 ../DPSDetector/db/eu_characters.lua
 ../DPSDetector/db/eu_lookup.lua

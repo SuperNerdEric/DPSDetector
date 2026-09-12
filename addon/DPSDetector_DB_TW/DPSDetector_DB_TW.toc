@@ -5,6 +5,7 @@
 ## Dependencies: DPSDetector
 ## DefaultState: disabled
 ## X-Region: Taiwan
+## X-Faction: Both
 ## X-Type: Mythic Plus
 ../DPSDetector/db/tw_characters.lua
 ../DPSDetector/db/tw_lookup.lua

@@ -1,12 +1,18 @@
 /**
  * Rebuilds Lua snapshots from tools/.cache without hitting the API.
- * Fixes percentile estimation: WCL characterRankings.count is the page
- * size (~100), not the global population.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  buildSpecIndex,
+  ingestRow,
+  luaString,
+  normalizeRealm,
+  packMetric,
+  rankingCacheKey,
+} from "./snapshot-lib.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ADDON_ROOT =
@@ -36,135 +42,78 @@ function normalizeRegion(value) {
 const REGION = normalizeRegion(
   process.argv.find((a, i, arr) => arr[i - 1] === "--region") || "us"
 );
-const PAGES = Number(process.argv.find((a, i, arr) => arr[i - 1] === "--pages") || 5);
-
-function normalizeRealm(realm) {
-  return String(realm || "")
-    .replace(/['’\-]/g, "")
-    .replace(/\s+/g, "")
-    .toLowerCase();
-}
-
-function playerKey(name, realm) {
-  return `${String(name).toLowerCase()}#${normalizeRealm(realm)}`;
-}
-
-function luaString(value) {
-  return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
+const PAGES = Number(process.argv.find((a, i, arr) => arr[i - 1] === "--pages") || 20);
 
 function cachePath(parts) {
   const hash = createHash("sha1").update(JSON.stringify(parts)).digest("hex");
   return join(CACHE_DIR, `${hash}.json`);
 }
 
-function rankingServer(row) {
-  if (typeof row.server === "string") return row.server;
-  return row.server?.name || row.server?.slug || "";
-}
-
-function estimatePercentile(absoluteRank, page, rankingsLength, hasMorePages) {
-  // When the board ends on this page, we know the exact population.
-  if (!hasMorePages) {
-    const total = (page - 1) * 100 + rankingsLength;
-    if (total <= 0) return 0;
-    return Math.max(0, Math.min(100, (100 * (total - absoluteRank + 1)) / total));
-  }
-
-  // Still more pages beyond what we fetched. Map the fetched window onto a
-  // high parse band so top ranks stay gold/pink and page-5 stays ~blue.
-  // Rank 1 => ~99, rank (pages*100) => ~50.
-  const window = Math.max(PAGES * 100, absoluteRank);
-  return Math.max(50, Math.min(99, 100 - ((absoluteRank - 1) / window) * 50));
-}
-
-function emptyMetric(dungeonCount) {
-  return {
-    overall: { amount: 0, percentile: 0, spec: 0 },
-    dungeons: Array.from({ length: dungeonCount }, () => ({ amount: 0, percentile: 0, spec: 0 })),
-  };
-}
-
-function consider(slot, amount, percentile, specId, dungeonIndex) {
-  if (!amount || amount <= 0) return;
-  const current = slot.dungeons[dungeonIndex];
-  if (amount > current.amount) {
-    slot.dungeons[dungeonIndex] = { amount, percentile, spec: specId };
-  }
-  if (amount > slot.overall.amount) {
-    slot.overall = { amount, percentile, spec: specId };
-  }
-}
-
-function packMetric(slot) {
-  if (!slot || slot.overall.amount <= 0) return "";
-  const parts = [
-    `${Math.round(slot.overall.amount)},${Math.round(slot.overall.percentile)},${slot.overall.spec}`,
-  ];
-  for (const dungeon of slot.dungeons) {
-    if (!dungeon.amount) parts.push("0,0,0");
-    else parts.push(`${Math.round(dungeon.amount)},${Math.round(dungeon.percentile)},${dungeon.spec}`);
-  }
-  return parts.join("|");
-}
-
 const dungeonCount = season.dungeons.length;
+const specIndex = buildSpecIndex(season.specs);
 const players = new Map();
 let loadedPages = 0;
 let missingPages = 0;
 
-for (const [dungeonIndex, dungeon] of season.dungeons.entries()) {
-  if (!dungeon.wclEncounterId) continue;
-  for (const spec of season.specs) {
-    const metric = spec.role === "healer" ? "hps" : "dps";
-    for (let page = 1; page <= PAGES; page += 1) {
-      const key = {
-        encounterId: dungeon.wclEncounterId,
-        className: spec.className,
-        specName: spec.specName,
-        metric,
-        region: REGION,
-        page,
-        difficulty: season.wclDifficulty ?? null,
-      };
-      const path = cachePath(key);
-      if (!existsSync(path)) {
-        missingPages += 1;
-        break;
-      }
-      const parsed = JSON.parse(readFileSync(path, "utf8"));
-      loadedPages += 1;
-      const rankings = parsed.rankings || [];
-      for (const [rowIndex, row] of rankings.entries()) {
-        const name = row.name;
-        const realm = rankingServer(row);
-        if (!name || !realm) continue;
-        const pk = playerKey(name, realm);
-        if (!players.has(pk)) {
-          players.set(pk, {
-            name,
-            realm,
-            damage: emptyMetric(dungeonCount),
-            tank: emptyMetric(dungeonCount),
-            healing: emptyMetric(dungeonCount),
-          });
-        }
-        const player = players.get(pk);
-        const amount = Number(row.amount) || 0;
-        const absoluteRank = ((parsed.page || page) - 1) * 100 + rowIndex + 1;
-        const percentile = estimatePercentile(
-          absoluteRank,
-          parsed.page || page,
-          rankings.length,
-          Boolean(parsed.hasMorePages)
-        );
-        const specId = Number(row.specID ?? row.specId ?? spec.specId ?? 0);
-        if (spec.role === "healer") consider(player.healing, amount, percentile, specId, dungeonIndex);
-        else if (spec.role === "tank") consider(player.tank, amount, percentile, specId, dungeonIndex);
-        else consider(player.damage, amount, percentile, specId, dungeonIndex);
-      }
-      if (!parsed.hasMorePages || rankings.length === 0) break;
+function seriesList() {
+  const series = [];
+  for (const [dungeonIndex, dungeon] of season.dungeons.entries()) {
+    if (!dungeon.wclEncounterId) continue;
+    for (const metric of ["dps", "hps"]) {
+      series.push({ dungeon, dungeonIndex, metric, className: null, specName: null, bracket: null });
     }
+    for (const spec of season.specs) {
+      for (const metric of ["dps", "hps"]) {
+        series.push({
+          dungeon,
+          dungeonIndex,
+          metric,
+          className: spec.className,
+          specName: spec.specName,
+          bracket: null,
+        });
+      }
+    }
+    for (let bracket = 1; bracket <= 30; bracket += 1) {
+      for (const metric of ["dps", "hps"]) {
+        series.push({
+          dungeon,
+          dungeonIndex,
+          metric,
+          className: null,
+          specName: null,
+          bracket,
+        });
+      }
+    }
+  }
+  return series;
+}
+
+for (const series of seriesList()) {
+  for (let page = 1; page <= PAGES; page += 1) {
+    const key = rankingCacheKey({
+      encounterId: series.dungeon.wclEncounterId,
+      className: series.className,
+      specName: series.specName,
+      metric: series.metric,
+      region: REGION,
+      page,
+      difficulty: season.wclDifficulty ?? null,
+      bracket: series.bracket,
+    });
+    const path = cachePath(key);
+    if (!existsSync(path)) {
+      missingPages += 1;
+      break;
+    }
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    loadedPages += 1;
+    const rankings = parsed.rankings || [];
+    for (const row of rankings) {
+      ingestRow(players, row, specIndex, dungeonCount, series.dungeonIndex, series.metric);
+    }
+    if (!parsed.hasMorePages || rankings.length === 0) break;
   }
 }
 
