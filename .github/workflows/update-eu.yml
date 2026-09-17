@@ -11,6 +11,10 @@ on:
         description: Delay between live API requests in milliseconds
         required: false
         default: "1200"
+      brackets:
+        description: Keystone levels for extra unfiltered boards (empty = spec only)
+        required: false
+        default: "10-30"
 
 permissions:
   contents: write
@@ -22,6 +26,7 @@ jobs:
       region: eu
       pages: ${{ github.event.inputs.pages || '20' }}
       delay: ${{ github.event.inputs.delay || '1200' }}
+      brackets: ${{ github.event.inputs.brackets || '10-30' }}
     secrets:
       WCL_CLIENT_ID: ${{ secrets.WCL_CLIENT_ID }}
       WCL_CLIENT_SECRET: ${{ secrets.WCL_CLIENT_SECRET }}

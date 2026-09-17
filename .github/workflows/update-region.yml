@@ -17,6 +17,11 @@ on:
         required: false
         type: string
         default: "1200"
+      brackets:
+        description: Keystone levels to crawl as extra unfiltered boards (empty = spec only)
+        required: false
+        type: string
+        default: "10-30"
     secrets:
       WCL_CLIENT_ID:
         required: true
@@ -42,6 +47,10 @@ on:
         description: Delay between API requests (ms)
         required: false
         default: "1200"
+      brackets:
+        description: Keystone levels to crawl as extra unfiltered boards (empty = spec only)
+        required: false
+        default: "10-30"
 
 permissions:
   contents: write
@@ -80,11 +89,17 @@ jobs:
           REGION: ${{ inputs.region }}
           PAGES: ${{ inputs.pages }}
           DELAY: ${{ inputs.delay }}
+          BRACKETS: ${{ inputs.brackets }}
         run: |
+          EXTRA_ARGS=()
+          if [ -n "$BRACKETS" ]; then
+            EXTRA_ARGS+=(--slice spec,bracket --brackets "$BRACKETS")
+          fi
           node update-db.mjs \
             --region "$REGION" \
             --pages "$PAGES" \
-            --delay "$DELAY"
+            --delay "$DELAY" \
+            "${EXTRA_ARGS[@]}"
 
       - name: Remove local secrets file
         working-directory: tools
