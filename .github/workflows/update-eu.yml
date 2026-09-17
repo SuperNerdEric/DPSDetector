@@ -12,6 +12,9 @@ on:
         required: false
         default: "1200"
 
+permissions:
+  contents: write
+
 jobs:
   update-eu:
     uses: ./.github/workflows/update-region.yml

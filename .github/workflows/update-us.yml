@@ -15,6 +15,9 @@ on:
     # Daily at 10:15 UTC — keeps Americas snapshot fresh without hammering the API
     - cron: "15 10 * * *"
 
+permissions:
+  contents: write
+
 jobs:
   update-us:
     uses: ./.github/workflows/update-region.yml
