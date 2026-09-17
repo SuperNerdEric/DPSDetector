@@ -16,8 +16,8 @@ on:
         required: false
         default: "10-30"
   schedule:
-    # Daily at 10:15 UTC — keeps Americas snapshot fresh without hammering the API
-    - cron: "15 10 * * *"
+    # Daily 08:00 UTC = 3:00 AM Central Daylight (2:00 AM Central Standard)
+    - cron: "0 8 * * *"
 
 permissions:
   contents: write
