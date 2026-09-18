@@ -62,6 +62,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -120,4 +122,5 @@ jobs:
             exit 0
           fi
           git commit -m "chore(db): refresh ${REGION} WCL snapshot"
+          git pull --rebase origin master
           git push
