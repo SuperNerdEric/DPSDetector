@@ -16,8 +16,8 @@ on:
         required: false
         default: "10-30"
   schedule:
-    # Daily 08:00 UTC = 3:00 AM Central Daylight (2:00 AM Central Standard)
-    - cron: "0 8 * * *"
+    # Daily 05:00 UTC = 12:00 AM Central Daylight (11:00 PM Central Standard)
+    - cron: "0 5 * * *"
 
 permissions:
   contents: write
