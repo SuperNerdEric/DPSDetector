@@ -70,24 +70,18 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Write credentials
+      - name: Discover season encounters
         working-directory: tools
         env:
           WCL_CLIENT_ID: ${{ secrets.WCL_CLIENT_ID }}
           WCL_CLIENT_SECRET: ${{ secrets.WCL_CLIENT_SECRET }}
-        run: |
-          cat > .env <<EOF
-          WCL_CLIENT_ID=${WCL_CLIENT_ID}
-          WCL_CLIENT_SECRET=${WCL_CLIENT_SECRET}
-          EOF
-
-      - name: Discover season encounters
-        working-directory: tools
         run: node update-db.mjs --discover
 
       - name: Crawl region rankings and write Lua
         working-directory: tools
         env:
+          WCL_CLIENT_ID: ${{ secrets.WCL_CLIENT_ID }}
+          WCL_CLIENT_SECRET: ${{ secrets.WCL_CLIENT_SECRET }}
           REGION: ${{ inputs.region }}
           PAGES: ${{ inputs.pages }}
           DELAY: ${{ inputs.delay }}
@@ -102,10 +96,6 @@ jobs:
             --pages "$PAGES" \
             --delay "$DELAY" \
             "${EXTRA_ARGS[@]}"
-
-      - name: Remove local secrets file
-        working-directory: tools
-        run: rm -f .env
 
       - name: Commit bundled addon data
         env:
